@@ -1,0 +1,9 @@
+# Restano solo sul Mac: la foto di riferimento e la scheda di progetto, che contiene dati personali.
+prove/
+PROGETTO.md
+
+# Scritti dall'agente di catalogo della Scrivania.
+README.md
+catalogo_file.csv
+
+.DS_Store
