@@ -167,6 +167,11 @@ export function verdict(gain, items, price = null, currency = '€') {
       kind = 'no';
       title = 'Non ne vale la pena';
     }
+    // Tanti outfit ma stile solo neutro: meglio aspettare un capo che lo sia davvero.
+    if (kind === 'si' && style.fit < 0.68 && !filled) {
+      kind = 'forse';
+      title = 'Forse: si abbina, ma non è il tuo stile';
+    }
     reasons.push(added === 1 ? 'Con i tuoi capi fa 1 outfit buono nuovo.' : `Con i tuoi capi fa ${added} outfit buoni nuovi.`);
     if (filled) reasons.push(`Per i ${filled.label} oggi non hai quasi niente di buono: questo li copre.`);
     else if (before && added) reasons.push(`Gli outfit buoni che puoi fare aumentano del ${Math.round((100 * added) / before)}%.`);

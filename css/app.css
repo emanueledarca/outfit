@@ -10,6 +10,9 @@
   --danger: #a33a2c;
   --warn-bg: #f6e7c8;
   --warn-ink: #6b4a10;
+  --ok-bg: #e3ead9;
+  --ok-ink: #3d5527;
+  --bad-bg: #f3dfd9;
   --radius: 14px;
   --tabbar: 64px;
   color-scheme: light;
@@ -28,6 +31,9 @@
     --danger: #e08a7c;
     --warn-bg: #4a3a1c;
     --warn-ink: #f2d9a6;
+    --ok-bg: #2c3622;
+    --ok-ink: #c3d6a6;
+    --bad-bg: #3d2420;
     color-scheme: dark;
   }
 }
@@ -187,7 +193,7 @@ select, input[type="text"], input[type="password"], input[type="number"] {
   right: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   height: calc(var(--tabbar) + env(safe-area-inset-bottom));
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--surface);
@@ -273,6 +279,78 @@ select, input[type="text"], input[type="password"], input[type="number"] {
 .wash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 0 10px; }
 .wash-grid .field { margin-top: 6px; }
 
+h3 { display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; margin: 0 0 6px; }
+h3 .ti { font-size: 18px; color: var(--muted); }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.card-head .eyebrow, .card-head h2 { margin: 0; }
+.chips.wrap { flex-wrap: wrap; overflow: visible; margin-bottom: 0; }
+.seg { display: flex; gap: 6px; flex-wrap: wrap; }
+.seg .chip { padding: 7px 10px; }
+
+/* Quanto un capo è nello stile: verde, neutro, fuori. */
+.fit-badge { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 0; padding: 6px 12px; border-radius: 999px; font-size: 14px; background: var(--surface-2); }
+.fit-badge .ti { font-size: 17px; }
+.fit-badge.in { background: var(--ok-bg); color: var(--ok-ink); }
+.fit-badge.out { background: var(--bad-bg); color: var(--danger); }
+.fit-badge .muted { color: inherit; opacity: .8; }
+
+.care { margin-top: 16px; padding: 12px 14px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); }
+.care p { font-size: 15px; }
+.care .tips { margin: 6px 0 0; font-size: 14px; color: var(--muted); }
+
+.wash-group { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.wash-group:first-child { padding-top: 0; }
+.wash-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.wash-head h3 { margin: 0; }
+.wash-head .btn { min-height: 36px; padding: 0 12px; font-size: 14px; }
+
+/* Foto della prova sopra l'outfit, quando c'è. */
+.look { display: block; width: 100%; padding: 0; margin: 0 0 12px; border: none; background: none; cursor: pointer; }
+.look img { width: 100%; max-height: 420px; object-fit: cover; object-position: top; border-radius: 12px; display: block; }
+
+.shot { position: relative; }
+.shot-vote { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 15px; background: var(--surface); color: var(--muted); }
+.shot-vote.up { background: var(--accent); color: var(--accent-ink); }
+
+.vote-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.vote {
+  font: inherit; font-size: 16px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 52px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface); color: var(--text);
+}
+.vote .ti { font-size: 22px; }
+/* Acquisti */
+.verdict { margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); }
+.verdict.si { background: var(--ok-bg); color: var(--ok-ink); }
+.verdict.forse { background: var(--warn-bg); color: var(--warn-ink); }
+.verdict.no { background: var(--bad-bg); color: var(--danger); }
+.verdict h3 { font-size: 17px; }
+.verdict h3 .ti { color: inherit; }
+.verdict .tips { color: inherit; margin: 0 0 4px; font-size: 14px; }
+.verdict .eyebrow { color: inherit; opacity: .8; margin-top: 10px; }
+.mini-board { display: flex; gap: 6px; margin-top: 6px; }
+.mini { width: 46px; height: 46px; border-radius: 8px; object-fit: cover; background: var(--surface); flex: none; }
+.mini.cutout { object-fit: contain; padding: 4px; }
+
+.cov { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.cov-row { display: grid; grid-template-columns: 22px 9.5em 1fr 2.2em; align-items: center; gap: 8px; font-size: 14px; }
+.cov-row .ti { font-size: 19px; color: var(--muted); }
+.cov-row .bar { height: 8px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.cov-row .bar span { display: block; height: 100%; border-radius: 99px; background: var(--accent); }
+.cov-row.weak, .cov-row.weak .ti { color: var(--danger); }
+.cov-row.weak .bar span { background: var(--danger); }
+.cov-n { text-align: right; font-variant-numeric: tabular-nums; }
+
+.buy { width: 100%; }
+.buy-text { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.tag { flex: none; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--surface-2); }
+.tag.si { background: var(--ok-bg); color: var(--ok-ink); }
+.tag.forse { background: var(--warn-bg); color: var(--warn-ink); }
+.tag.no { background: var(--bad-bg); color: var(--danger); }
+
+.vote.no.on { background: var(--bad-bg); color: var(--danger); border-color: transparent; }
+.vote.yes.on, .vote.yes:active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
 #toast {
   position: fixed;
   left: 50%;
@@ -295,3 +373,16 @@ select, input[type="text"], input[type="password"], input[type="number"] {
 @media (prefers-reduced-motion: reduce) {
   #toast { transition: none; }
 }
+
+/* Resoconto */
+.summary section { padding: 4px 0 16px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+.summary section:last-child { border-bottom: none; margin-bottom: 0; }
+.summary h3 { margin-bottom: 8px; }
+.days { display: flex; flex-direction: column; gap: 6px; }
+.day { display: grid; grid-template-columns: 4.2em 22px 5.5em 1fr; align-items: center; gap: 8px; font-size: 14px; }
+.day .ti { font-size: 19px; color: var(--muted); }
+.day-name::first-letter { text-transform: uppercase; }
+.day-temp { font-variant-numeric: tabular-nums; }
+.day-note { color: var(--muted); }
+.day.bad .day-note { color: var(--danger); }
+.cost { flex: none; font-variant-numeric: tabular-nums; font-size: 14px; }

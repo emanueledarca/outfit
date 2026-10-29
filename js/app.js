@@ -8,11 +8,12 @@ import { FABRICS, FAMILIES, VOLUME_LABELS, CATEGORY_STYLE, styleFitOf, styleLabe
 import { careOf, laundryGroups, PROGRAMS } from './care.js';
 import { shoppingList, gainOf, verdict, examplesWith, wardrobeCoverage } from './shop.js';
 import { fetchForecast, geocode, commuteOf, STOCKHOLM } from './weather.js';
+import { weekSummary } from './stats.js';
 import { analyzeGarment, testKey, MODELS } from './gemini.js';
 import { resizeImage, makeThumb, dominantColor, blobToDataUrl, dataUrlToBlob, isCutout, imageFromClipboard } from './images.js';
 import { buildSheet, tryOnPrompt, fixPrompt, PERSON_PLACEHOLDER, DEFAULT_RULES } from './sheet.js';
 import { DEMO_ITEMS } from './demo.js';
-import { h, icon, blobUrl, toast, openSheet, pickFile, copyText, shareOrDownload, formatDay } from './ui.js';
+import { h, fill, icon, blobUrl, toast, openSheet, pickFile, copyText, shareOrDownload, formatDay } from './ui.js';
 
 const S = {
   tab: 'oggi',
@@ -39,10 +40,10 @@ const thresholds = () => S.settings.washThresholds ?? {};
 const byId = (id) => S.items.find((it) => it.id === id);
 const owned = () => S.items.filter((it) => it.status !== 'desiderato');
 const currency = () => S.settings.currency ?? '€';
+const withCommute = (day) => ({ ...day, commute: commuteOf(day, S.settings.outHour ?? 8, S.settings.backHour ?? 18) });
 function todayWeather() {
   const day = S.forecast?.find((d) => d.date === today());
-  if (!day) return null;
-  return { ...day, commute: commuteOf(day, S.settings.outHour ?? 8, S.settings.backHour ?? 18) };
+  return day ? withCommute(day) : null;
 }
 const todayLog = () => S.log.find((e) => e.id === today());
 const changed = () => { S.version += 1; };
@@ -112,6 +113,7 @@ function currentSuggestion() {
       votes: S.votes,
       disliked: S.disliked,
       noRepeatDays: S.settings.noRepeatDays ?? 14,
+      coldBias: S.settings.coldBias ?? 0,
     });
     suggestionKey = key;
     S.pick = 0;
@@ -186,6 +188,8 @@ function swapPiece(outfit, slot) {
 
 function thumb(it, cls = 'thumb') {
   if (it?.thumb) return h('img', { class: `${cls}${isCutout(it.thumb) ? ' cutout' : ''}`, src: blobUrl(it.thumb), alt: '' });
+  // Capo non ancora comprato: la foto del modello della capsule.
+  if (it?.modelPhoto) return h('img', { class: cls, src: it.modelPhoto, alt: '' });
   const [r, g, b] = COLOR_RGB[it?.color] ?? [170, 170, 170];
   return h('span', { class: `${cls} swatch`, style: { background: `rgb(${r},${g},${b})` }, 'aria-hidden': 'true' });
 }
@@ -205,13 +209,14 @@ function weatherLine(w) {
     return h('p', { class: 'weather muted' }, icon('cloud-off'),
       S.weatherError ? 'Meteo non disponibile: propongo un outfit per una giornata fresca' : 'Carico il meteo…');
   }
-  const need = weatherNeed(w);
+  const need = weatherNeed(w, { coldBias: S.settings.coldBias ?? 0 });
   const c = w.commute;
   const extra = [c
     ? `${c.outHour}:00 ${Math.round(c.outApp)}°, ${c.backHour}:00 ${Math.round(c.backApp)}° percepiti`
     : `${need.temp}° percepiti`];
   const prob = c ? c.precipProb : w.precipProb;
   if (prob >= 30) extra.push(`${c ? 'nel tragitto ' : ''}pioggia ${prob}%`);
+  if (need.windy) extra.push(`vento ${need.wind} km/h`);
   if (need.snowGround) extra.push('neve a terra');
   return h('p', { class: 'weather' }, icon(weatherIcon(w.code)),
     h('span', {}, `${place().name.split(',')[0]} ${Math.round(w.tMin)}° / ${Math.round(w.tMax)}°, ${w.label}`),
@@ -321,7 +326,8 @@ function viewGuardaroba() {
   return h('section', {}, pageHead(null, 'Guardaroba', h('p', { class: 'muted' }, `${owned().length} capi`)),
     filters,
     h('div', { class: 'row' }, catSelect,
-      counts.lavare ? h('button', { class: 'btn', onclick: openLaundry }, icon('wash-machine'), `Da lavare (${counts.lavare})`) : null),
+      counts.lavare ? h('button', { class: 'btn', onclick: openLaundry }, icon('wash-machine'), `Da lavare (${counts.lavare})`) : null,
+      owned().length ? h('button', { class: 'btn', onclick: openSummary }, icon('chart-bar'), 'Resoconto') : null),
     list.length
       ? h('div', { class: 'grid' }, list.map(itemCard))
       : h('p', { class: 'muted empty-line' }, S.items.length ? 'Nessun capo con questi filtri.' : 'Ancora nessun capo.'),
@@ -338,6 +344,54 @@ function itemCard(it) {
     h('span', { class: 'item-meta' }, categoryOf(it).label, limit ? ` · ${it.wearsSinceWash ?? 0}/${limit}` : ''));
 }
 
+// Resoconto: la settimana passata, i prossimi giorni, i capi dimenticati e quanto costano.
+function openSummary() {
+  const r = weekSummary({
+    items: S.items, log: S.log, today: today(), forecast: (S.forecast ?? []).map(withCommute),
+    coldBias: S.settings.coldBias ?? 0, noRepeatDays: S.settings.noRepeatDays ?? 14,
+  });
+  let close;
+  const cur = currency();
+  const money = (n) => `${n < 10 ? n.toFixed(1) : Math.round(n)} ${cur}`;
+  const short = (iso) => formatDay(iso, { weekday: 'short', day: 'numeric' });
+  const costRows = [...r.cost.dearest, ...r.cost.cheapest.filter((c) => !r.cost.dearest.includes(c))];
+
+  const body = h('div', { class: 'summary' },
+    h('section', {},
+      h('h3', {}, icon('calendar-week'), 'Ultimi 7 giorni'),
+      r.worn
+        ? h('p', {}, `${r.worn} ${r.worn === 1 ? 'outfit segnato' : 'outfit segnati'}, con ${r.distinct} capi diversi su ${r.owned}.`)
+        : h('p', { class: 'muted' }, 'Nessun outfit segnato. Con "L\'ho messo oggi" qui vedi come usi il guardaroba.'),
+      r.top.length ? h('div', { class: 'pick-list' }, r.top.map(({ item, wears }) =>
+        h('div', { class: 'pick' }, thumb(item), h('span', { class: 'buy-text' }, h('span', {}, item.name), h('span', { class: 'item-meta' }, `${wears} volte nell'ultimo mese`))))) : null),
+
+    r.ahead.length ? h('section', {},
+      h('h3', {}, icon('cloud'), 'I prossimi giorni'),
+      h('div', { class: 'days' }, r.ahead.map((d) => h('div', { class: `day${d.issue ? ' bad' : ''}` },
+        h('span', { class: 'day-name' }, short(d.date)),
+        icon(weatherIcon(d.code)),
+        h('span', { class: 'day-temp' }, `${Math.round(d.tMin)}° / ${Math.round(d.tMax)}°`),
+        h('span', { class: 'day-note' }, d.issue ?? (d.need.windy ? 'ventoso, sei coperto' : 'sei coperto'))))),
+      r.issues.length ? h('button', { class: 'btn wide', onclick: () => { close(); go('compra'); } }, icon('shopping-bag'), 'Cosa manca: vedi gli acquisti') : null) : null,
+
+    r.forgotten.length ? h('section', {},
+      h('h3', {}, icon('zzz'), 'Dimenticati'),
+      h('div', { class: 'pick-list' }, r.forgotten.map(({ item, days, never }) =>
+        h('button', { class: 'pick', onclick: () => { close(); openEditor(item); } }, thumb(item),
+          h('span', { class: 'buy-text' }, h('span', {}, item.name), h('span', { class: 'item-meta' }, never ? `mai messo, da ${days} giorni nell'armadio` : `non lo metti da ${days} giorni`))))),
+      h('p', { class: 'hint' }, 'Se non ti convince più, segnalo "Fuori stagione" o "Rovinato": smette di contare.')) : null,
+
+    h('section', {},
+      h('h3', {}, icon('coin-euro'), 'Costo per utilizzo'),
+      costRows.length
+        ? h('div', { class: 'pick-list' }, costRows.map(({ item, wears, perWear }) =>
+          h('div', { class: 'pick' }, thumb(item),
+            h('span', { class: 'buy-text' }, h('span', {}, item.name), h('span', { class: 'item-meta' }, wears ? `${wears} ${wears === 1 ? 'volta' : 'volte'}` : 'mai messo')),
+            h('span', { class: 'cost' }, wears ? money(perWear) : money(item.price)))))
+        : h('p', { class: 'muted' }, 'Aggiungi il prezzo ai capi (in "Etichetta, prezzo e prova") per vedere quanto ti costa ogni utilizzo.')));
+  close = openSheet('Resoconto', body);
+}
+
 // Bucato: i capi da lavare divisi per programma della lavatrice.
 function openLaundry() {
   let close;
@@ -351,7 +405,7 @@ function openLaundry() {
   function paint() {
     const dirty = S.items.filter((it) => it.status === 'lavare');
     if (!dirty.length) { close?.(); return; }
-    body.replaceChildren(
+    fill(body, 
       ...laundryGroups(dirty).map((g) => h('div', { class: 'wash-group' },
         h('div', { class: 'wash-head' }, h('h3', {}, g.label),
           h('button', { class: 'btn', onclick: () => done(g.items) }, icon('check'), 'Lavati')),
@@ -368,7 +422,8 @@ function lastWorn(id) {
 }
 
 // preset: dati di partenza per un capo nuovo (per esempio un modello della capsule appena comprato).
-function openEditor(item, preset = null) {
+// check: modalità "Lo compro?", con il verdetto sopra e i pulsanti per la lista.
+function openEditor(item, preset = null, { check: checkMode = false } = {}) {
   const isNew = !item;
   const draft = item ? { ...item } : { id: crypto.randomUUID(), status: 'disponibile', category: 'maglione', createdAt: Date.now(), wearsSinceWash: 0, totalWears: 0, ...preset };
   const prevStatus = draft.status;
@@ -386,7 +441,7 @@ function openEditor(item, preset = null) {
     }), out);
   };
   const check = (key, label, value) => h('label', { class: 'check' },
-    h('input', { type: 'checkbox', checked: Boolean(value), onchange: (e) => { draft[key] = e.target.checked; } }), label);
+    h('input', { type: 'checkbox', checked: Boolean(value), onchange: (e) => { draft[key] = e.target.checked; paint(); } }), label);
 
   async function setPhoto(kind, fromClipboard = false) {
     let file;
@@ -445,19 +500,37 @@ function openEditor(item, preset = null) {
     }
   }
 
-  async function save() {
+  async function save(status = draft.status) {
     if (!draft.name?.trim()) {
       body.querySelector('.name-error').textContent = 'Dai un nome al capo';
       body.querySelector('input[type=text]').focus();
       return;
     }
     draft.name = draft.name.trim();
+    draft.status = status;
     if (prevStatus === 'lavare' && draft.status === 'disponibile') draft.wearsSinceWash = 0;
+    const bought = prevStatus === 'desiderato' && status === 'disponibile';
+    if (bought) draft.boughtAt = today();
     delete draft.colorTouched;
     await saveItems([draft]);
     close();
-    toast(isNew ? 'Capo aggiunto' : 'Salvato');
+    if (status === 'desiderato') toast(isNew ? 'Aggiunto alla lista' : 'Salvato nella lista');
+    else if (bought) toast(draft.photo ? 'Nel guardaroba' : 'Nel guardaroba: aggiungi la foto vera quando puoi');
+    else toast(isNew ? 'Capo aggiunto' : 'Salvato');
     render();
+  }
+
+  // Verdetto "Lo compro?" sul capo com'è ora nel modulo.
+  function verdictPanel(candidate) {
+    const others = S.items.filter((it) => it.id !== draft.id);
+    const v = verdict(gainOf(candidate, others), others, draft.price, currency());
+    const examples = v.kind === 'no' ? [] : examplesWith(candidate, others, 3);
+    const kindIcon = { si: 'circle-check', forse: 'circle-dot', no: 'circle-x' }[v.kind];
+    return h('div', { class: `verdict ${v.kind}`, 'aria-live': 'polite' },
+      h('h3', {}, icon(kindIcon), v.title),
+      h('ul', { class: 'tips' }, v.reasons.map((r) => h('li', {}, r))),
+      examples.length ? h('p', { class: 'eyebrow' }, 'Ci fai per esempio') : null,
+      examples.map((o) => h('div', { class: 'mini-board' }, outfitItems(o).map((it) => thumb(it, 'mini')))));
   }
 
   async function remove() {
@@ -491,15 +564,23 @@ function openEditor(item, preset = null) {
       delete draft.styleScore;
       paint();
     };
+    const wished = draft.status === 'desiderato';
+    const priceField = field(`Prezzo (${currency()})`, h('input', {
+      type: 'number', min: '0', step: '1', inputmode: 'decimal', value: draft.price ?? '',
+      oninput: (e) => { draft.price = e.target.value ? Number(e.target.value) : undefined; },
+      onchange: () => { if (checkMode) paint(); },
+    }), checkMode ? 'Con il prezzo ti dico quanto costa a utilizzo.' : 'Serve al costo per utilizzo nel resoconto.');
 
-    body.replaceChildren(
+    fill(body, 
       h('div', { class: 'photos' }, photoTile('photo', 'Foto del capo', draft.photo), photoTile('label', 'Foto etichetta', draft.label)),
       h('button', { class: 'link', onclick: () => setPhoto('photo', true) }, icon('clipboard'), 'Incolla il capo scontornato'),
       draft.photo ? null : h('p', { class: 'hint' }, 'Scontorno: in Foto tieni premuto sul capo, tocca "Copia", poi torna qui e incolla.'),
       h('button', { class: 'btn wide', disabled: busy, onclick: readWithGemini }, icon('sparkles'), busy ? 'Leggo…' : 'Leggi con Gemini'),
       field('Nome', text('name', 'Cappotto tweed marrone')),
       h('p', { class: 'name-error error', 'aria-live': 'polite' }),
-      h('p', { class: `fit-badge ${style.fit >= 0.68 ? 'in' : style.fit >= 0.45 ? 'mid' : 'out'}` },
+      checkMode ? priceField : null,
+      checkMode ? verdictPanel({ ...draft, fabric, volume, families }) : null,
+      checkMode ? null : h('p', { class: `fit-badge ${style.fit >= 0.68 ? 'in' : style.fit >= 0.45 ? 'mid' : 'out'}` },
         icon(style.fit >= 0.68 ? 'circle-check' : style.fit >= 0.45 ? 'circle-dot' : 'circle-x'),
         styleLabel(style.fit)[0].toUpperCase() + styleLabel(style.fit).slice(1),
         style.why && style.fit < 0.68 ? h('span', { class: 'muted' }, ` · ${style.why}`) : null),
@@ -538,10 +619,7 @@ function openEditor(item, preset = null) {
         field('Composizione', text('composition', '80% lana, 20% poliammide')),
         field('Lavaggio dall\'etichetta', text('care', 'lana 30°, no asciugatrice')),
         h('div', { class: 'two' }, field('Taglia', text('size')), field('Marca', text('brand'))),
-        field(`Prezzo (${currency()})`, h('input', {
-          type: 'number', min: '0', step: '1', inputmode: 'decimal', value: draft.price ?? '',
-          oninput: (e) => { draft.price = e.target.value ? Number(e.target.value) : undefined; },
-        }), 'Serve al costo per utilizzo nelle statistiche.'),
+        checkMode ? null : priceField,
         field('Descrizione per la prova', text('descriptionEn', 'brown herringbone tweed overcoat'), 'In inglese: è il nome che finisce nel foglio prova.'),
         field('A lavare dopo', h('input', {
           type: 'number', min: '1', max: '30', inputmode: 'numeric', value: draft.washAfter ?? '',
@@ -551,14 +629,84 @@ function openEditor(item, preset = null) {
         field('Note', text('notes'))),
       isNew ? null : h('p', { class: 'muted stats' },
         `Messo ${draft.totalWears ?? 0} ${(draft.totalWears ?? 0) === 1 ? 'volta' : 'volte'} · ${draft.wearsSinceWash ?? 0} dall'ultimo lavaggio${last ? ` · ultima volta ${formatDay(last, { day: 'numeric', month: 'short' })}` : ''}`),
-      h('div', { class: 'row end' },
-        isNew ? null : h('button', { class: 'btn danger', onclick: remove }, icon('trash'), 'Elimina'),
-        h('span', { class: 'spacer' }),
-        h('button', { class: 'btn primary', onclick: save }, icon('check'), 'Salva')));
+      wished
+        ? h('div', { class: 'row end' },
+          isNew ? null : h('button', { class: 'btn danger', onclick: remove }, icon('trash'), 'Elimina'),
+          h('span', { class: 'spacer' }),
+          h('button', { class: 'btn', onclick: () => save('desiderato') }, icon('list-check'), isNew ? 'In lista' : 'Salva'),
+          h('button', { class: 'btn primary', onclick: () => save('disponibile') }, icon('shopping-bag-check'), 'L\'ho comprato'))
+        : h('div', { class: 'row end' },
+          isNew ? null : h('button', { class: 'btn danger', onclick: remove }, icon('trash'), 'Elimina'),
+          h('span', { class: 'spacer' }),
+          h('button', { class: 'btn primary', onclick: () => save() }, icon('check'), 'Salva')));
   }
 
   paint();
-  close = openSheet(isNew ? 'Nuovo capo' : draft.name, body);
+  close = openSheet(checkMode && isNew ? 'Lo compro?' : isNew ? 'Nuovo capo' : draft.name, body);
+}
+
+// ---------- Acquisti ----------
+
+const SCENARIO_ICON = { freddo: 'temperature-minus', pioggia: 'cloud-rain', gelo: 'snowflake', mezza: 'leaf', estate: 'sun' };
+
+// Un modello della capsule diventa la bozza di un capo da comprare.
+function presetFromTemplate(c) {
+  const { id, photo, template, demo, ...rest } = c;
+  return { ...rest, templateId: id, modelPhoto: photo, status: 'desiderato' };
+}
+
+function buyRow(gain, items) {
+  const c = gain.candidate;
+  const v = verdict(gain, items);
+  const meta = gain.accessory
+    ? (gain.added ? 'ti manca' : 'ne hai già uno')
+    : `+${gain.added} outfit buoni${gain.filled ? ` · copre i ${gain.filled.label}` : ''}`;
+  const open = () => (c.template ? openEditor(null, presetFromTemplate(c), { check: true }) : openEditor(c, null, { check: true }));
+  return h('button', { class: 'pick buy', onclick: open },
+    thumb(c.template ? { ...c, modelPhoto: c.photo } : c),
+    h('span', { class: 'buy-text' }, h('span', {}, c.name), h('span', { class: 'item-meta' }, meta)),
+    h('span', { class: `tag ${v.kind}` }, { si: 'sì', forse: 'forse', no: 'no' }[v.kind]));
+}
+
+function viewCompra() {
+  const head = pageHead(null, 'Acquisti', h('p', { class: 'muted' }, 'Cosa conviene comprare, contando gli outfit buoni che ci fai.'));
+  const checkCard = h('div', { class: 'card' },
+    h('h2', {}, 'Lo compro?'),
+    h('p', { class: 'muted' }, 'In negozio: foto al capo e all\'etichetta, e ti dico quanti outfit buoni aggiunge ai tuoi.'),
+    h('button', { class: 'btn primary wide', onclick: () => openEditor(null, { status: 'desiderato' }, { check: true }) }, icon('scan'), 'Valuta un capo'));
+
+  if (owned().length < 6) {
+    return h('section', {}, head, checkCard, h('div', { class: 'card empty' },
+      h('p', {}, 'Con almeno 6 capi nel guardaroba ti dico anche cosa manca e cosa comprare per primo.'),
+      h('button', { class: 'btn', onclick: () => go('guardaroba') }, 'Vai al guardaroba')));
+  }
+
+  const cov = wardrobeCoverage(S.items);
+  const max = Math.max(1, ...cov.byScenario.map((s) => s.good));
+  const coverage = h('div', { class: 'card' },
+    h('h2', {}, 'Outfit buoni per tipo di giornata'),
+    h('div', { class: 'cov' }, cov.byScenario.map((s) => h('div', { class: `cov-row${s.good < 2 ? ' weak' : ''}` },
+      icon(SCENARIO_ICON[s.id]),
+      h('span', {}, s.label[0].toUpperCase() + s.label.slice(1)),
+      h('span', { class: 'bar', 'aria-hidden': 'true' }, h('span', { style: { width: `${Math.max(3, (100 * s.good) / max)}%` } })),
+      h('span', { class: 'cov-n' }, String(s.good))))),
+    cov.byScenario.some((s) => s.good < 2 && s.weight >= 0.15)
+      ? h('p', { class: 'hint' }, 'Le righe in rosso sono le giornate per cui oggi non hai quasi niente di buono.')
+      : null);
+
+  const list = shoppingList(S.items, DEMO_ITEMS);
+  const wished = list.filter((g) => !g.candidate.template);
+  const ideas = list.filter((g) => g.candidate.template && g.value > 0).slice(0, 6);
+  return h('section', {}, head, checkCard, coverage,
+    wished.length ? h('div', { class: 'card' },
+      h('h2', {}, 'La tua lista'),
+      h('div', { class: 'pick-list' }, wished.map((g) => buyRow(g, S.items)))) : null,
+    h('div', { class: 'card' },
+      h('h2', {}, 'Dalla capsule "vintage nordico"'),
+      ideas.length
+        ? [h('p', { class: 'muted' }, 'Dal più utile: tocca un capo per vedere con cosa lo abbini.'),
+          h('div', { class: 'pick-list' }, ideas.map((g) => buyRow(g, S.items)))]
+        : h('p', { class: 'muted' }, 'Hai già tutto quello che serve alla capsule.')));
 }
 
 // ---------- Prova ----------
@@ -725,6 +873,9 @@ function openTryOn(t, review = false) {
 
 // ---------- Impostazioni ----------
 
+// Gradi tolti alla temperatura percepita prima di scegliere gli strati.
+const COLD_BIAS = [[-2, 'Lo sento poco'], [0, 'Normale'], [3, 'Lo soffro'], [6, 'Lo soffro molto']];
+
 function viewAltro() {
   const s = S.settings;
   const keyInput = h('input', { type: 'password', autocomplete: 'off', placeholder: 'AIza…', value: s.geminiKey ?? '' });
@@ -786,6 +937,24 @@ function viewAltro() {
             }
           },
         }, 'Cerca'))),
+
+    h('div', { class: 'card' },
+      h('h2', {}, 'Freddo e tragitto'),
+      h('p', { class: 'field-label' }, 'Quanto soffri il freddo'),
+      h('div', { class: 'chips wrap', role: 'group', 'aria-label': 'Quanto soffri il freddo' },
+        COLD_BIAS.map(([v, label]) => h('button', {
+          class: 'chip', 'aria-pressed': String((s.coldBias ?? 0) === v),
+          onclick: async () => { await saveSetting('coldBias', v); changed(); render(); },
+        }, label))),
+      h('p', { class: 'hint' }, 'Il primo inverno a Stoccolma "Lo soffro" è una scelta prudente: l\'app conta 3 gradi in meno.'),
+      h('div', { class: 'two' },
+        ['outHour', 'backHour'].map((k, i) => h('label', { class: 'field' },
+          h('span', { class: 'field-label' }, i ? 'Rientri alle' : 'Esci alle'),
+          h('input', {
+            type: 'number', min: '0', max: '23', inputmode: 'numeric', value: s[k] ?? (i ? 18 : 8),
+            onchange: async (e) => { await saveSetting(k, Math.min(23, Math.max(0, Number(e.target.value) || (i ? 18 : 8)))); changed(); },
+          })))),
+      h('p', { class: 'hint' }, 'Il meteo dell\'outfit è quello di queste due ore, non la media del giorno.')),
 
     h('div', { class: 'card' },
       h('h2', {}, 'Regole'),
@@ -880,7 +1049,7 @@ async function importBackup() {
 
 // ---------- navigazione ----------
 
-const VIEWS = { oggi: viewOggi, guardaroba: viewGuardaroba, prova: viewProva, altro: viewAltro };
+const VIEWS = { oggi: viewOggi, guardaroba: viewGuardaroba, compra: viewCompra, prova: viewProva, altro: viewAltro };
 
 function go(tab) {
   if (tab !== 'prova') S.tryIds = tab === 'oggi' ? null : S.tryIds;

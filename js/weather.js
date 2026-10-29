@@ -11,7 +11,7 @@ const WMO = {
 
 export const STOCKHOLM = { name: 'Stoccolma', lat: 59.3293, lon: 18.0686 };
 
-const HOURLY = ['temperature_2m', 'apparent_temperature', 'precipitation_probability', 'precipitation', 'snowfall', 'snow_depth', 'wind_speed_10m'];
+const HOURLY = ['temperature_2m', 'apparent_temperature', 'precipitation_probability', 'precipitation', 'snowfall', 'snow_depth', 'wind_speed_10m', 'wind_gusts_10m'];
 
 export async function fetchForecast({ lat, lon }) {
   const url = new URL('https://api.open-meteo.com/v1/forecast');
@@ -19,10 +19,12 @@ export async function fetchForecast({ lat, lon }) {
     latitude: lat,
     longitude: lon,
     timezone: 'auto',
-    forecast_days: '3',
+    // Sette giorni: servono anche al resoconto della settimana.
+    forecast_days: '7',
     daily: [
       'weather_code', 'temperature_2m_max', 'temperature_2m_min', 'apparent_temperature_max',
       'apparent_temperature_min', 'precipitation_sum', 'precipitation_probability_max', 'snowfall_sum',
+      'wind_speed_10m_max', 'wind_gusts_10m_max',
     ].join(','),
     hourly: HOURLY.join(','),
   });
@@ -42,6 +44,8 @@ export async function fetchForecast({ lat, lon }) {
     precipSum: d.precipitation_sum[i] ?? 0,
     precipProb: d.precipitation_probability_max[i] ?? 0,
     snow: d.snowfall_sum[i] ?? 0,
+    windMax: d.wind_speed_10m_max?.[i] ?? 0,
+    gustMax: d.wind_gusts_10m_max?.[i] ?? 0,
     // 24 valori orari per variabile, dalle 0 alle 23 del giorno.
     hours: hr ? Object.fromEntries(HOURLY.map((k) => [k, hr[k].slice(i * 24, i * 24 + 24)])) : null,
   }));
@@ -64,7 +68,9 @@ export function commuteOf(day, outHour = 8, backHour = 18) {
     precip: Math.max(...window.map((x) => at('precipitation', x))),
     snowfall: Math.max(...window.map((x) => at('snowfall', x))),
     snowDepth: at('snow_depth', outHour),
-    wind: Math.max(at('wind_speed_10m', outHour), at('wind_speed_10m', backHour)),
+    // km/h, nelle ore in cui sei fuori.
+    wind: Math.max(...window.map((x) => at('wind_speed_10m', x))),
+    gust: Math.max(...window.map((x) => at('wind_gusts_10m', x))),
   };
 }
 

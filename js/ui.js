@@ -17,6 +17,12 @@ export function h(tag, props = {}, ...children) {
   return el;
 }
 
+// Come replaceChildren, ma salta null e false come fa h().
+export function fill(el, ...children) {
+  el.replaceChildren(...children.flat(Infinity).filter((c) => c != null && c !== false));
+  return el;
+}
+
 export const icon = (name) => h('i', { class: `ti ti-${name}`, 'aria-hidden': 'true' });
 
 // Un URL per Blob, riusato finché il Blob esiste.

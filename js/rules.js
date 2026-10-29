@@ -110,7 +110,10 @@ export const washAfterOf = (it, thresholds = {}) =>
 
 // Una persona non mette il camoscio sotto la pioggia.
 const FEARS_RAIN = /camoscio|suede|nabuk|scamosciat/i;
-export const fearsRain = (it) => FEARS_RAIN.test(`${it.name ?? ''} ${it.composition ?? ''}`);
+export const fearsRain = (it) => it.fabric === 'camoscio' || FEARS_RAIN.test(`${it.name ?? ''} ${it.composition ?? ''}`);
+
+// Col vento conta che il capospalla non lasci passare l'aria.
+export const isWindproof = (it) => isWaterproof(it) || ['cappotto', 'parka'].includes(it.category) || ['tecnico', 'pelle'].includes(it.fabric);
 
 export const pairKey = (a, b) => (a < b ? `${a}+${b}` : `${b}+${a}`);
 
@@ -123,21 +126,31 @@ export function outfitItems(outfit) {
   return SLOTS.map((s) => outfit[s]).filter(Boolean);
 }
 
+// Vento forte (km/h): l'ombrello non regge e sciarpa e berretto servono prima.
+export const WINDY = { wind: 30, gust: 50 };
+
 // Livello di calore richiesto. Con le previsioni orarie (w.commute) conta il tragitto:
 // il capospalla deve reggere il momento più freddo fra uscita e rientro.
-export function weatherNeed(w) {
-  if (!w) return { level: 2, wet: false, snow: false, snowGround: false, temp: null };
+// coldBias: gradi da togliere per chi soffre il freddo (negativo per chi non lo sente).
+// La temperatura percepita di Open-Meteo tiene già conto del vento.
+export function weatherNeed(w, { coldBias = 0 } = {}) {
+  if (!w) return { level: 2, wet: false, snow: false, snowGround: false, windy: false, deep: false, wind: 0, temp: null };
   const c = w.commute;
-  const t = c
+  const t = (c
     ? 0.6 * Math.min(c.outApp, c.backApp) + 0.4 * Math.max(c.outApp, c.backApp)
-    : 0.7 * w.appMax + 0.3 * w.appMin;
+    : 0.7 * w.appMax + 0.3 * w.appMin) - coldBias;
   const level = t >= 18 ? 0 : t >= 12 ? 1 : t >= 5 ? 2 : t >= -3 ? 3 : 4;
+  // Sotto i -10 percepiti, l'inverno di Stoccolma vero: tutto coperto, stivali.
+  const deep = t < -10;
+  const wind = c ? c.wind ?? 0 : w.windMax ?? 0;
+  const gust = c ? c.gust ?? 0 : w.gustMax ?? 0;
+  const windy = wind >= WINDY.wind || gust >= WINDY.gust;
   const snowGround = Boolean(c && c.snowDepth > 0.01);
   const snow = (c ? c.snowfall > 0 : (w.snow ?? 0) > 0) || snowGround;
   const rainy = c
     ? c.precipProb >= 50 || c.precip >= 0.3 || (w.precipProb ?? 0) >= 80 || (w.precipSum ?? 0) >= 4
     : (w.precipProb ?? 0) >= 50 || (w.precipSum ?? 0) >= 1;
-  return { level, wet: snow || rainy, snow, snowGround, temp: Math.round(t) };
+  return { level, wet: snow || rainy, snow, snowGround, windy, deep, wind: Math.round(Math.max(wind, gust * 0.6)), temp: Math.round(t) };
 }
 
 const TARGET_WARMTH = [1, 3, 6, 8, 10];
@@ -235,6 +248,17 @@ export function qualityOf(o, { need, target, traits }) {
     for (const it of core) if (fearsRain(it)) q -= 2;
   }
   if (need.level === 0 && o.shoes.category === 'stivali') q -= 1;
+
+  if (need.windy && need.level >= 1) {
+    if (o.outer) q += isWindproof(o.outer) ? 0.6 : -0.3;
+    else if (o.mid && categoryOf(o.mid).open) q -= 0.8;
+    // Pioggia col vento: l'ombrello non serve, conta il capospalla.
+    if (need.wet && o.outer && !isWaterproof(o.outer)) q -= 0.7;
+  }
+  if (need.deep) {
+    if (o.shoes.category !== 'stivali') q -= 1.2;
+    if (o.outer && warmthOf(o.outer) < 5) q -= 1;
+  }
   return { q, notes: look.notes, styleFit: look.styleFit };
 }
 
@@ -267,7 +291,9 @@ function reasonsFor(o, ctx, notes = []) {
   const { need, last, today, votes } = ctx;
   const reasons = [];
   if (need.snow && o.outer) reasons.push(`Neve: ${o.outer.name.toLowerCase()} e ${o.shoes.name.toLowerCase()}`);
-  else if (need.wet && o.outer && isWaterproof(o.outer)) reasons.push(`Pioggia: ${o.outer.name.toLowerCase()}`);
+  else if (need.wet && o.outer && isWaterproof(o.outer)) reasons.push(`Pioggia${need.windy ? ' e vento' : ''}: ${o.outer.name.toLowerCase()}${need.windy ? ', niente ombrello' : ''}`);
+  else if (need.windy && o.outer && isWindproof(o.outer)) reasons.push(`Vento a ${need.wind} km/h: ${o.outer.name.toLowerCase()}${need.wet ? ', niente ombrello' : ''}`);
+  else if (need.deep) reasons.push(`${need.temp}° percepiti: guanti, berretto e stivali`);
   else if (need.temp != null && need.level >= 3) reasons.push(`${need.temp}° percepiti nel tragitto: tre strati`);
 
   if (notes.length) reasons.push(notes[0]);
@@ -287,11 +313,11 @@ function reasonsFor(o, ctx, notes = []) {
 }
 
 // Restituisce gli outfit possibili per `today`, dal migliore.
-// ctx: { today, weather, occasion, log, votes, disliked, noRepeatDays }
+// ctx: { today, weather, occasion, log, votes, disliked, noRepeatDays, coldBias }
 //   log: [{ date, itemIds, signature }], votes: { "a+b": n }, disliked: { signature: date }
 export function suggestOutfits(items, ctx) {
   const { today, weather, occasion = 'lab', log = [], votes = {}, disliked = {}, noRepeatDays = 14 } = ctx;
-  const need = weatherNeed(weather);
+  const need = weatherNeed(weather, { coldBias: ctx.coldBias ?? 0 });
   const available = items.filter((it) => (it.status ?? 'disponibile') === 'disponibile');
   const by = Object.fromEntries(SLOTS.map((s) => [s, available.filter((it) => slotOf(it) === s)]));
   const past = log.filter((e) => e.date < today);
@@ -337,9 +363,9 @@ export function suggestOutfits(items, ctx) {
       .slice(0, 12)
       .map(({ o, score, quality, notes }) => {
         const full = { ...o, score, quality };
-        if (need.level >= 3) full.scarf = pickAccessory(by.scarf, last, today);
-        if (need.level >= 4 || (need.level >= 3 && need.snow)) full.hat = pickAccessory(by.hat, last, today);
-        if (need.level >= 4) full.gloves = pickAccessory(by.gloves, last, today);
+        if (need.level >= 3 || (need.level >= 2 && need.windy)) full.scarf = pickAccessory(by.scarf, last, today);
+        if (need.level >= 4 || (need.level >= 3 && (need.snow || need.windy))) full.hat = pickAccessory(by.hat, last, today);
+        if (need.level >= 4 || need.deep) full.gloves = pickAccessory(by.gloves, last, today);
         return { ...full, signature: signatureOf(full), reasons: reasonsFor(full, sctx, notes) };
       });
     return { need, relaxed: i > 0, outfits: ranked, missing: [] };
