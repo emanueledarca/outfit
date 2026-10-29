@@ -1,23 +1,33 @@
 // Regole del guardaroba e scelta dell'outfit del giorno.
 // Nessuna dipendenza dal DOM: si testa con `node --test tests/`.
 
+import { aesthetic, traitsOf } from './style.js';
+
 export const SLOTS = ['outer', 'mid', 'base', 'bottom', 'shoes', 'scarf', 'hat', 'gloves'];
 export const CORE_SLOTS = ['outer', 'mid', 'base', 'bottom', 'shoes'];
 
 // washAfter: utilizzi prima di finire "a lavare" (null = mai in automatico).
+// open: sotto si vede la maglia (cardigan, overshirt, gilet).
 export const CATEGORIES = {
   cappotto:  { label: 'Cappotto',  slot: 'outer',  warmth: 5, formality: 4, washAfter: null },
   giacca:    { label: 'Giacca',    slot: 'outer',  warmth: 3, formality: 3, washAfter: null },
+  blazer:    { label: 'Blazer',    slot: 'outer',  warmth: 2, formality: 4, washAfter: null },
   parka:     { label: 'Parka',     slot: 'outer',  warmth: 5, formality: 2, washAfter: null, waterproof: true },
   maglione:  { label: 'Maglione',  slot: 'mid',    warmth: 3, formality: 3, washAfter: 4 },
   dolcevita: { label: 'Dolcevita', slot: 'mid',    warmth: 3, formality: 4, washAfter: 4 },
-  cardigan:  { label: 'Cardigan',  slot: 'mid',    warmth: 2, formality: 3, washAfter: 4 },
+  cardigan:  { label: 'Cardigan',  slot: 'mid',    warmth: 2, formality: 3, washAfter: 4, open: true },
+  overshirt: { label: 'Overshirt', slot: 'mid',    warmth: 2, formality: 2, washAfter: 4, open: true },
+  gilet:     { label: 'Gilet',     slot: 'mid',    warmth: 2, formality: 3, washAfter: 5, open: true },
+  pile:      { label: 'Pile',      slot: 'mid',    warmth: 3, formality: 1, washAfter: 4 },
   felpa:     { label: 'Felpa',     slot: 'mid',    warmth: 2, formality: 1, washAfter: 3 },
   camicia:   { label: 'Camicia',   slot: 'base',   warmth: 1, formality: 3, washAfter: 2 },
+  polo:      { label: 'Polo',      slot: 'base',   warmth: 1, formality: 2, washAfter: 1 },
   tshirt:    { label: 'T-shirt',   slot: 'base',   warmth: 1, formality: 2, washAfter: 1 },
   pantalone: { label: 'Pantalone', slot: 'bottom', warmth: 2, formality: 4, washAfter: 5 },
   jeans:     { label: 'Jeans',     slot: 'bottom', warmth: 2, formality: 2, washAfter: 8 },
-  scarpe:    { label: 'Scarpe',    slot: 'shoes',  warmth: 1, formality: 2, washAfter: null },
+  shorts:    { label: 'Shorts',    slot: 'bottom', warmth: 0, formality: 1, washAfter: 3 },
+  scarpe:    { label: 'Scarpe',    slot: 'shoes',  warmth: 1, formality: 3, washAfter: null },
+  sneakers:  { label: 'Sneakers',  slot: 'shoes',  warmth: 1, formality: 1, washAfter: null },
   stivali:   { label: 'Stivali',   slot: 'shoes',  warmth: 2, formality: 3, washAfter: null, waterproof: true },
   sciarpa:   { label: 'Sciarpa',   slot: 'scarf',  warmth: 1, formality: 3, washAfter: null },
   berretto:  { label: 'Berretto',  slot: 'hat',    warmth: 1, formality: 2, washAfter: null },
@@ -29,6 +39,7 @@ export const STATES = {
   lavare: 'A lavare',
   rovinato: 'Rovinato',
   stagione: 'Fuori stagione',
+  desiderato: 'Da comprare',
 };
 
 export const OCCASIONS = {
@@ -64,6 +75,7 @@ export const COLORS = [
   ['viola', [110, 70, 140], false],
 ];
 export const NEUTRALS = new Set(COLORS.filter((c) => c[2]).map((c) => c[0]));
+export const isAccent = (it) => Boolean(it.color) && !NEUTRALS.has(it.color);
 export const COLOR_RGB = Object.fromEntries(COLORS.map(([name, rgb]) => [name, rgb]));
 
 // Distanza "redmean": approssima la percezione meglio dell'euclidea in RGB.
@@ -111,14 +123,21 @@ export function outfitItems(outfit) {
   return SLOTS.map((s) => outfit[s]).filter(Boolean);
 }
 
-// Livello di calore richiesto dalla temperatura percepita di giorno.
+// Livello di calore richiesto. Con le previsioni orarie (w.commute) conta il tragitto:
+// il capospalla deve reggere il momento più freddo fra uscita e rientro.
 export function weatherNeed(w) {
-  if (!w) return { level: 2, wet: false, snow: false, temp: null };
-  const t = 0.7 * w.appMax + 0.3 * w.appMin;
+  if (!w) return { level: 2, wet: false, snow: false, snowGround: false, temp: null };
+  const c = w.commute;
+  const t = c
+    ? 0.6 * Math.min(c.outApp, c.backApp) + 0.4 * Math.max(c.outApp, c.backApp)
+    : 0.7 * w.appMax + 0.3 * w.appMin;
   const level = t >= 18 ? 0 : t >= 12 ? 1 : t >= 5 ? 2 : t >= -3 ? 3 : 4;
-  const snow = (w.snow ?? 0) > 0;
-  const wet = snow || (w.precipProb ?? 0) >= 50 || (w.precipSum ?? 0) >= 1;
-  return { level, wet, snow, temp: Math.round(t) };
+  const snowGround = Boolean(c && c.snowDepth > 0.01);
+  const snow = (c ? c.snowfall > 0 : (w.snow ?? 0) > 0) || snowGround;
+  const rainy = c
+    ? c.precipProb >= 50 || c.precip >= 0.3 || (w.precipProb ?? 0) >= 80 || (w.precipSum ?? 0) >= 4
+    : (w.precipProb ?? 0) >= 50 || (w.precipSum ?? 0) >= 1;
+  return { level, wet: snow || rainy, snow, snowGround, temp: Math.round(t) };
 }
 
 const TARGET_WARMTH = [1, 3, 6, 8, 10];
@@ -137,7 +156,7 @@ function hash01(text) {
   return ((h >>> 0) % 10000) / 10000;
 }
 
-function* combinations(by, need) {
+export function* combinations(by, need) {
   const minOuter = need.level >= 4 ? 5 : need.level === 3 ? 4 : 3;
   let outers;
   if (need.level === 0) outers = [null, ...by.outer.filter((o) => warmthOf(o) <= 3)];
@@ -148,15 +167,17 @@ function* combinations(by, need) {
   }
   if (!outers.length) outers = [null];
   const mids = need.level >= 2 && by.mid.length ? by.mid : need.level >= 1 ? [null, ...by.mid] : [null];
+  const bottoms = by.bottom.filter((b) => (b.category === 'shorts' ? need.level === 0 : true));
 
   for (const outer of outers) {
     for (const mid of mids) {
       if (need.level === 1 && !outer && !mid) continue;
-      // Sotto un maglione la maglietta non si vede: la si propone solo da sola o sotto un cardigan.
-      const bases = !mid || mid.category === 'cardigan' ? by.base : [null];
+      // Sotto un maglione la maglietta non si vede: la si propone da sola o sotto un capo aperto.
+      const bases = !mid || categoryOf(mid).open ? by.base : [null];
       for (const base of bases) {
         if (!mid && !base) continue;
-        for (const bottom of by.bottom) {
+        if (mid && categoryOf(mid).open && !base) continue;
+        for (const bottom of bottoms) {
           for (const shoes of by.shoes) yield { outer, mid, base, bottom, shoes };
         }
       }
@@ -179,46 +200,77 @@ function pickAccessory(list, last, today) {
   return [...list].sort((a, b) => since(b) - since(a))[0];
 }
 
+// Tratti dei capi (colore, tessuto, volume, stile), calcolati una volta per capo.
+export function traitCache() {
+  const cache = new WeakMap();
+  return (it) => {
+    let t = cache.get(it);
+    if (!t) {
+      t = traitsOf(it, slotOf(it), (name) => COLOR_RGB[name]);
+      cache.set(it, t);
+    }
+    return t;
+  };
+}
+
+// Qualità di un outfit, senza rotazione né voti: gusto, meteo, formalità.
+// È il numero che decide se un outfit è "buono" anche per gli acquisti.
+export function qualityOf(o, { need, target, traits }) {
+  const pieces = CORE_SLOTS.filter((s) => o[s]).map((s) => ({ it: o[s], slot: s, t: traits(o[s]) }));
+  const core = pieces.map((p) => p.it);
+  const look = aesthetic(pieces, isAccent);
+  let q = 1.5 * look.score;
+
+  const warmth = ['outer', 'mid', 'base'].reduce((t, s) => t + (o[s] ? warmthOf(o[s]) : 0), 0);
+  q -= 0.4 * Math.abs(warmth - TARGET_WARMTH[need.level]);
+
+  const forms = core.map(formalityOf);
+  const avg = forms.reduce((a, b) => a + b, 0) / forms.length;
+  q -= 0.6 * Math.abs(avg - target);
+  q -= 0.5 * Math.max(0, Math.max(...forms) - Math.min(...forms) - 2);
+
+  if (need.wet) {
+    q += o.outer && isWaterproof(o.outer) ? 1 : -1;
+    q += isWaterproof(o.shoes) ? 0.75 : -0.25;
+    for (const it of core) if (fearsRain(it)) q -= 2;
+  }
+  if (need.level === 0 && o.shoes.category === 'stivali') q -= 1;
+  return { q, notes: look.notes, styleFit: look.styleFit };
+}
+
+// Sopra questa soglia un outfit conta come "buono".
+export const GOOD_QUALITY = 1;
+
 function scoreOutfit(o, ctx) {
-  const { need, last, today, votes, target } = ctx;
+  const { need, last, today, votes } = ctx;
   const core = CORE_SLOTS.map((s) => o[s]).filter(Boolean);
   const since = (it) => (last.has(it.id) ? Math.min(14, daysBetween(last.get(it.id), today)) : 14);
-  let score = 0;
+  const { q, notes } = qualityOf(o, ctx);
+  let score = q;
 
   // Rotazione: conta soprattutto per le maglie, poco per capospalla e scarpe.
   const weight = { outer: 0.3, mid: 1, base: 1, bottom: 0.5, shoes: 0.3 };
   for (const s of CORE_SLOTS) if (o[s]) score += weight[s] * (since(o[s]) / 14) * 3;
 
-  const warmth = ['outer', 'mid', 'base'].reduce((t, s) => t + (o[s] ? warmthOf(o[s]) : 0), 0);
-  score -= 0.4 * Math.abs(warmth - TARGET_WARMTH[need.level]);
-
-  const forms = core.map(formalityOf);
-  const avg = forms.reduce((a, b) => a + b, 0) / forms.length;
-  score -= 0.6 * Math.abs(avg - target);
-  score -= 0.5 * Math.max(0, Math.max(...forms) - Math.min(...forms) - 2);
-
   if (need.wet) {
-    if (o.outer && isWaterproof(o.outer)) score += 2;
-    if (isWaterproof(o.shoes)) score += 1.5;
-    for (const it of core) if (fearsRain(it)) score -= 2;
+    if (o.outer && isWaterproof(o.outer)) score += 1;
+    if (isWaterproof(o.shoes)) score += 0.75;
   }
-  if (need.level === 0 && o.shoes.category === 'stivali') score -= 1;
-
-  const accents = core.filter((it) => it.color && !NEUTRALS.has(it.color)).length;
-  score -= 1.5 * Math.max(0, accents - 1);
 
   for (let i = 0; i < core.length; i++) {
     for (let j = i + 1; j < core.length; j++) score += 0.8 * (votes[pairKey(core[i].id, core[j].id)] ?? 0);
   }
-  return score + 0.6 * hash01(`${today}|${signatureOf(o)}`);
+  return { score: score + 0.6 * hash01(`${today}|${signatureOf(o)}`), quality: q, notes };
 }
 
-function reasonsFor(o, ctx) {
+function reasonsFor(o, ctx, notes = []) {
   const { need, last, today, votes } = ctx;
   const reasons = [];
   if (need.snow && o.outer) reasons.push(`Neve: ${o.outer.name.toLowerCase()} e ${o.shoes.name.toLowerCase()}`);
   else if (need.wet && o.outer && isWaterproof(o.outer)) reasons.push(`Pioggia: ${o.outer.name.toLowerCase()}`);
-  else if (need.temp != null && need.level >= 3) reasons.push(`${need.temp}° percepiti: tre strati`);
+  else if (need.temp != null && need.level >= 3) reasons.push(`${need.temp}° percepiti nel tragitto: tre strati`);
+
+  if (notes.length) reasons.push(notes[0]);
 
   const top = o.mid ?? o.base;
   if (top) {
@@ -231,7 +283,7 @@ function reasonsFor(o, ctx) {
   const core = CORE_SLOTS.map((s) => o[s]).filter(Boolean);
   const liked = core.some((a, i) => core.slice(i + 1).some((b) => (votes[pairKey(a.id, b.id)] ?? 0) > 0));
   if (liked) reasons.push('Abbinamento che ti è piaciuto');
-  return reasons.slice(0, 2);
+  return reasons.slice(0, 3);
 }
 
 // Restituisce gli outfit possibili per `today`, dal migliore.
@@ -260,7 +312,7 @@ export function suggestOutfits(items, ctx) {
       .map(([sig]) => sig),
   );
   const target = (OCCASIONS[occasion] ?? OCCASIONS.lab).formality;
-  const sctx = { need, last, today, votes, target };
+  const sctx = { need, last, today, votes, target, traits: ctx.traits ?? traitCache() };
 
   const attempts = [
     { repeatDays: noRepeatDays, yesterdayRule: true },
@@ -280,15 +332,15 @@ export function suggestOutfits(items, ctx) {
     }
     if (!out.length) continue;
     const ranked = out
-      .map((o) => ({ ...o, score: scoreOutfit(o, sctx) }))
+      .map((o) => ({ o, ...scoreOutfit(o, sctx) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 12)
-      .map((o) => {
-        const full = { ...o };
+      .map(({ o, score, quality, notes }) => {
+        const full = { ...o, score, quality };
         if (need.level >= 3) full.scarf = pickAccessory(by.scarf, last, today);
         if (need.level >= 4 || (need.level >= 3 && need.snow)) full.hat = pickAccessory(by.hat, last, today);
         if (need.level >= 4) full.gloves = pickAccessory(by.gloves, last, today);
-        return { ...full, signature: signatureOf(full), reasons: reasonsFor(full, sctx) };
+        return { ...full, signature: signatureOf(full), reasons: reasonsFor(full, sctx, notes) };
       });
     return { need, relaxed: i > 0, outfits: ranked, missing: [] };
   }

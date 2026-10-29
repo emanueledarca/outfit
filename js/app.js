@@ -1,10 +1,13 @@
 import { db, setSetting } from './db.js';
 import {
-  CATEGORIES, STATES, OCCASIONS, COLORS, COLOR_RGB, SLOTS,
+  CATEGORIES, STATES, OCCASIONS, COLORS, COLOR_RGB, SLOTS, CORE_SLOTS,
   suggestOutfits, applyWear, undoWear, washed, voteDelta, weatherNeed, isoDay, daysBetween,
   signatureOf, outfitItems, slotOf, categoryOf, warmthOf, formalityOf, isWaterproof, washAfterOf,
 } from './rules.js';
-import { fetchForecast, geocode, STOCKHOLM } from './weather.js';
+import { FABRICS, FAMILIES, VOLUME_LABELS, CATEGORY_STYLE, styleFitOf, styleLabel, guessFabric, guessVolume } from './style.js';
+import { careOf, laundryGroups, PROGRAMS } from './care.js';
+import { shoppingList, gainOf, verdict, examplesWith, wardrobeCoverage } from './shop.js';
+import { fetchForecast, geocode, commuteOf, STOCKHOLM } from './weather.js';
 import { analyzeGarment, testKey, MODELS } from './gemini.js';
 import { resizeImage, makeThumb, dominantColor, blobToDataUrl, dataUrlToBlob, isCutout, imageFromClipboard } from './images.js';
 import { buildSheet, tryOnPrompt, fixPrompt, PERSON_PLACEHOLDER, DEFAULT_RULES } from './sheet.js';
@@ -34,7 +37,13 @@ const today = () => isoDay();
 const place = () => S.settings.place ?? STOCKHOLM;
 const thresholds = () => S.settings.washThresholds ?? {};
 const byId = (id) => S.items.find((it) => it.id === id);
-const todayWeather = () => S.forecast?.find((d) => d.date === today()) ?? null;
+const owned = () => S.items.filter((it) => it.status !== 'desiderato');
+const currency = () => S.settings.currency ?? '€';
+function todayWeather() {
+  const day = S.forecast?.find((d) => d.date === today());
+  if (!day) return null;
+  return { ...day, commute: commuteOf(day, S.settings.outHour ?? 8, S.settings.backHour ?? 18) };
+}
 const todayLog = () => S.log.find((e) => e.id === today());
 const changed = () => { S.version += 1; };
 
@@ -197,10 +206,29 @@ function weatherLine(w) {
       S.weatherError ? 'Meteo non disponibile: propongo un outfit per una giornata fresca' : 'Carico il meteo…');
   }
   const need = weatherNeed(w);
-  const rain = w.precipProb >= 30 ? ` · pioggia ${w.precipProb}%` : '';
+  const c = w.commute;
+  const extra = [c
+    ? `${c.outHour}:00 ${Math.round(c.outApp)}°, ${c.backHour}:00 ${Math.round(c.backApp)}° percepiti`
+    : `${need.temp}° percepiti`];
+  const prob = c ? c.precipProb : w.precipProb;
+  if (prob >= 30) extra.push(`${c ? 'nel tragitto ' : ''}pioggia ${prob}%`);
+  if (need.snowGround) extra.push('neve a terra');
   return h('p', { class: 'weather' }, icon(weatherIcon(w.code)),
     h('span', {}, `${place().name.split(',')[0]} ${Math.round(w.tMin)}° / ${Math.round(w.tMax)}°, ${w.label}`),
-    h('span', { class: 'muted' }, ` · ${need.temp}° percepiti${rain}`));
+    h('span', { class: 'muted' }, ` · ${extra.join(' · ')}`));
+}
+
+// Una prova già fatta (e non scartata) con gli stessi vestiti.
+function tryOnFor(ids) {
+  const key = (list) => list.map(byId).filter((it) => it && CORE_SLOTS.includes(slotOf(it))).map((it) => it.id).sort().join(',');
+  const k = key(ids);
+  return k ? S.tryons.find((t) => t.vote !== -1 && key(t.itemIds) === k) ?? null : null;
+}
+
+function lookPhoto(ids) {
+  const t = tryOnFor(ids);
+  return t ? h('button', { class: 'look', onclick: () => openTryOn(t), 'aria-label': 'Apri la prova' },
+    h('img', { src: blobUrl(t.photo), alt: 'Tu con questo outfit' })) : null;
 }
 
 function pageHead(eyebrow, title, extra) {
@@ -218,7 +246,7 @@ function board(items, onPiece) {
 function viewOggi() {
   const t = today();
   const head = pageHead(formatDay(t), 'Outfit di oggi', weatherLine(todayWeather()));
-  if (!S.items.length) {
+  if (!owned().length) {
     return h('section', {}, head, h('div', { class: 'card empty' },
       h('p', {}, 'Il guardaroba è vuoto. Aggiungi i tuoi capi, oppure prova l\'app con la capsule "vintage nordico".'),
       h('div', { class: 'row' },
@@ -231,6 +259,7 @@ function viewOggi() {
     const items = worn.itemIds.map(byId).filter(Boolean);
     return h('section', {}, head, h('div', { class: 'card' },
       h('p', { class: 'eyebrow' }, 'Oggi indossi'),
+      lookPhoto(worn.itemIds),
       board(items),
       h('div', { class: 'row' },
         h('button', { class: 'btn primary', onclick: () => goTry(worn.itemIds) }, icon('camera'), 'Vediti con questo'),
@@ -254,6 +283,7 @@ function viewOggi() {
   const items = outfitItems(outfit);
   const total = sug.outfits.length;
   return h('section', {}, head, occasions, h('div', { class: 'card' },
+    lookPhoto(items.map((it) => it.id)),
     board(items, (it) => swapPiece(outfit, slotOf(it))),
     outfit.reasons?.length ? h('ul', { class: 'reasons' }, outfit.reasons.map((r) => h('li', {}, r))) : null,
     sug.relaxed ? h('p', { class: 'note' }, 'Hai pochi capi disponibili: ho allentato la regola sulle ripetizioni.') : null,
@@ -273,11 +303,14 @@ function viewGuardaroba() {
   const counts = Object.fromEntries(Object.keys(STATES).map((k) => [k, 0]));
   for (const it of S.items) counts[it.status ?? 'disponibile'] += 1;
   const cats = [...new Set(S.items.map((it) => it.category))];
-  const list = S.items.filter((it) =>
-    (S.filter === 'tutti' || (it.status ?? 'disponibile') === S.filter) && (S.category === 'tutte' || it.category === S.category));
+  const list = S.items.filter((it) => {
+    const st = it.status ?? 'disponibile';
+    const ok = S.filter === 'tutti' ? st !== 'desiderato' : st === S.filter;
+    return ok && (S.category === 'tutte' || it.category === S.category);
+  });
 
   const filters = h('div', { class: 'chips', role: 'group', 'aria-label': 'Stato' },
-    [['tutti', 'Tutti', S.items.length], ...Object.entries(STATES).map(([k, l]) => [k, l, counts[k]])]
+    [['tutti', 'Tutti', owned().length], ...Object.entries(STATES).map(([k, l]) => [k, l, counts[k]])]
       .filter(([k, , n]) => k === 'tutti' || n > 0)
       .map(([k, label, n]) => h('button', { class: 'chip', 'aria-pressed': String(S.filter === k), onclick: () => { S.filter = k; render(); } },
         `${label} ${n}`)));
@@ -285,10 +318,10 @@ function viewGuardaroba() {
     h('option', { value: 'tutte' }, 'Tutte le categorie'),
     cats.map((c) => h('option', { value: c, selected: S.category === c }, CATEGORIES[c]?.label ?? c)));
 
-  return h('section', {}, pageHead(null, 'Guardaroba', h('p', { class: 'muted' }, `${S.items.length} capi`)),
+  return h('section', {}, pageHead(null, 'Guardaroba', h('p', { class: 'muted' }, `${owned().length} capi`)),
     filters,
     h('div', { class: 'row' }, catSelect,
-      counts.lavare ? h('button', { class: 'btn', onclick: laundryDone }, icon('wash-machine'), `Ho fatto il bucato (${counts.lavare})`) : null),
+      counts.lavare ? h('button', { class: 'btn', onclick: openLaundry }, icon('wash-machine'), `Da lavare (${counts.lavare})`) : null),
     list.length
       ? h('div', { class: 'grid' }, list.map(itemCard))
       : h('p', { class: 'muted empty-line' }, S.items.length ? 'Nessun capo con questi filtri.' : 'Ancora nessun capo.'),
@@ -305,11 +338,28 @@ function itemCard(it) {
     h('span', { class: 'item-meta' }, categoryOf(it).label, limit ? ` · ${it.wearsSinceWash ?? 0}/${limit}` : ''));
 }
 
-async function laundryDone() {
-  const dirty = S.items.filter((it) => it.status === 'lavare').map(washed);
-  await saveItems(dirty);
-  toast(`${dirty.length} capi di nuovo disponibili`);
-  render();
+// Bucato: i capi da lavare divisi per programma della lavatrice.
+function openLaundry() {
+  let close;
+  const body = h('div', {});
+  async function done(list) {
+    await saveItems(list.map(washed));
+    toast(`${list.length} ${list.length === 1 ? 'capo di nuovo disponibile' : 'capi di nuovo disponibili'}`);
+    render();
+    paint();
+  }
+  function paint() {
+    const dirty = S.items.filter((it) => it.status === 'lavare');
+    if (!dirty.length) { close?.(); return; }
+    body.replaceChildren(
+      ...laundryGroups(dirty).map((g) => h('div', { class: 'wash-group' },
+        h('div', { class: 'wash-head' }, h('h3', {}, g.label),
+          h('button', { class: 'btn', onclick: () => done(g.items) }, icon('check'), 'Lavati')),
+        h('div', { class: 'pick-list' }, g.items.map((it) => h('div', { class: 'pick' }, thumb(it), h('span', {}, it.name)))))),
+      h('button', { class: 'btn primary wide', onclick: () => done(dirty) }, icon('wash-machine'), 'Ho lavato tutto'));
+  }
+  paint();
+  close = openSheet('Da lavare', body);
 }
 
 function lastWorn(id) {
@@ -317,9 +367,10 @@ function lastWorn(id) {
   return dates.at(-1) ?? null;
 }
 
-function openEditor(item) {
+// preset: dati di partenza per un capo nuovo (per esempio un modello della capsule appena comprato).
+function openEditor(item, preset = null) {
   const isNew = !item;
-  const draft = item ? { ...item } : { id: crypto.randomUUID(), status: 'disponibile', category: 'maglione', createdAt: Date.now(), wearsSinceWash: 0, totalWears: 0 };
+  const draft = item ? { ...item } : { id: crypto.randomUUID(), status: 'disponibile', category: 'maglione', createdAt: Date.now(), wearsSinceWash: 0, totalWears: 0, ...preset };
   const prevStatus = draft.status;
   let busy = false;
   const body = h('div', { class: 'editor' });
@@ -353,7 +404,11 @@ function openEditor(item) {
       if (kind === 'photo') {
         draft.photo = blob;
         draft.thumb = await makeThumb(blob);
-        if (!draft.colorTouched) draft.color = (await dominantColor(blob)).name;
+        if (!draft.colorTouched) {
+          const dc = await dominantColor(blob);
+          draft.color = dc.name;
+          draft.rgb = dc.rgb;
+        }
       } else {
         draft.label = blob;
       }
@@ -377,7 +432,7 @@ function openEditor(item) {
     try {
       const r = await analyzeGarment(S.settings.geminiKey, S.settings.geminiModel ?? MODELS[0], draft.photo ?? draft.label, draft.photo ? draft.label : null);
       for (const [k, v] of Object.entries(r)) {
-        if (v === null || v === '') continue;
+        if (v === null || v === '' || (Array.isArray(v) && !v.length)) continue;
         if (k === 'color' && draft.colorTouched) continue;
         draft[k] = v;
       }
@@ -421,8 +476,22 @@ function openEditor(item) {
 
   function paint() {
     const cat = categoryOf(draft);
+    const slot = cat.slot;
     const limit = washAfterOf({ ...draft, washAfter: undefined }, thresholds());
     const last = isNew ? null : lastWorn(draft.id);
+    const fabric = draft.fabric ?? guessFabric(draft, CATEGORY_STYLE[draft.category]?.fabric ?? 'cotone');
+    const volume = draft.volume ?? guessVolume(draft, draft.category === 'stivali' ? 3 : 2);
+    const families = draft.families?.length ? draft.families : CATEGORY_STYLE[draft.category]?.families ?? [];
+    const style = styleFitOf({ ...draft, fabric, volume, families }, slot);
+    const care = careOf({ ...draft, fabric });
+    const volLabels = slot === 'shoes' ? VOLUME_LABELS.shoes : VOLUME_LABELS.other;
+    const toggleFamily = (f) => {
+      const next = families.includes(f) ? families.filter((x) => x !== f) : [...families, f].slice(-2);
+      draft.families = next;
+      delete draft.styleScore;
+      paint();
+    };
+
     body.replaceChildren(
       h('div', { class: 'photos' }, photoTile('photo', 'Foto del capo', draft.photo), photoTile('label', 'Foto etichetta', draft.label)),
       h('button', { class: 'link', onclick: () => setPhoto('photo', true) }, icon('clipboard'), 'Incolla il capo scontornato'),
@@ -430,14 +499,26 @@ function openEditor(item) {
       h('button', { class: 'btn wide', disabled: busy, onclick: readWithGemini }, icon('sparkles'), busy ? 'Leggo…' : 'Leggi con Gemini'),
       field('Nome', text('name', 'Cappotto tweed marrone')),
       h('p', { class: 'name-error error', 'aria-live': 'polite' }),
+      h('p', { class: `fit-badge ${style.fit >= 0.68 ? 'in' : style.fit >= 0.45 ? 'mid' : 'out'}` },
+        icon(style.fit >= 0.68 ? 'circle-check' : style.fit >= 0.45 ? 'circle-dot' : 'circle-x'),
+        styleLabel(style.fit)[0].toUpperCase() + styleLabel(style.fit).slice(1),
+        style.why && style.fit < 0.68 ? h('span', { class: 'muted' }, ` · ${style.why}`) : null),
       h('div', { class: 'two' },
         field('Categoria', h('select', { onchange: (e) => { draft.category = e.target.value; delete draft.warmth; delete draft.formality; paint(); } },
           Object.entries(CATEGORIES).map(([k, c]) => h('option', { value: k, selected: draft.category === k }, c.label)))),
-        field('Colore', h('select', { onchange: (e) => { draft.color = e.target.value; draft.colorTouched = true; } },
+        field('Colore', h('select', { onchange: (e) => { draft.color = e.target.value; draft.colorTouched = true; delete draft.rgb; paint(); } },
           h('option', { value: '' }, '—'),
           COLORS.map(([name]) => h('option', { value: name, selected: draft.color === name }, name))))),
+      h('div', { class: 'two' },
+        field(slot === 'shoes' ? 'Linea' : 'Vestibilità', h('div', { class: 'seg', role: 'group' },
+          volLabels.map((l, i) => h('button', { class: 'chip', 'aria-pressed': String(volume === i + 1), onclick: () => { draft.volume = i + 1; paint(); } }, l)))),
+        field('Tessuto', h('select', { onchange: (e) => { draft.fabric = e.target.value; paint(); } },
+          Object.entries(FABRICS).map(([k, f]) => h('option', { value: k, selected: fabric === k }, f.label))))),
+      field('Stile (al massimo due)', h('div', { class: 'chips wrap', role: 'group' },
+        Object.entries(FAMILIES).map(([k, f]) => h('button', { class: 'chip', 'aria-pressed': String(families.includes(k)), onclick: () => toggleFamily(k) }, f.label)))),
       h('div', { class: 'checks' },
         check('pattern', 'Fantasia (righe, quadri…)', draft.pattern),
+        check('logo', 'Logo o stampa in vista', draft.logo),
         check('waterproof', 'Impermeabile', isWaterproof(draft))),
       field('Calore', range('warmth', warmthOf(draft), ['leggerissimo', 'leggero', 'medio', 'caldo', 'pesante'])),
       field('Formalità', range('formality', formalityOf(draft), ['sportivo', 'casual', 'smart casual', 'curato', 'elegante'])),
@@ -445,11 +526,22 @@ function openEditor(item) {
         Object.entries(STATES).map(([k, l]) => h('button', {
           class: 'chip', 'aria-pressed': String(draft.status === k), onclick: () => { draft.status = k; paint(); },
         }, l))),
+      h('div', { class: 'care' },
+        h('h3', {}, icon('wash'), 'Come lavarlo'),
+        h('p', {}, PROGRAMS[care.program].label,
+          care.temp && care.program !== 'niente' ? ` · massimo ${care.temp}°` : '',
+          care.program !== 'niente' ? (care.dryer ? ' · asciugatrice a bassa temperatura' : ' · niente asciugatrice') : ''),
+        h('ul', { class: 'tips' }, care.tips.map((t) => h('li', {}, t))),
+        care.fromLabel ? null : h('p', { class: 'hint' }, 'Dal tessuto. Con la foto dell\'etichetta Gemini legge le istruzioni vere.')),
       h('details', { class: 'more', open: Boolean(draft.composition || draft.care) },
-        h('summary', {}, 'Etichetta e prova'),
+        h('summary', {}, 'Etichetta, prezzo e prova'),
         field('Composizione', text('composition', '80% lana, 20% poliammide')),
-        field('Lavaggio', text('care', 'a mano 30°, no asciugatrice')),
+        field('Lavaggio dall\'etichetta', text('care', 'lana 30°, no asciugatrice')),
         h('div', { class: 'two' }, field('Taglia', text('size')), field('Marca', text('brand'))),
+        field(`Prezzo (${currency()})`, h('input', {
+          type: 'number', min: '0', step: '1', inputmode: 'decimal', value: draft.price ?? '',
+          oninput: (e) => { draft.price = e.target.value ? Number(e.target.value) : undefined; },
+        }), 'Serve al costo per utilizzo nelle statistiche.'),
         field('Descrizione per la prova', text('descriptionEn', 'brown herringbone tweed overcoat'), 'In inglese: è il nome che finisce nel foglio prova.'),
         field('A lavare dopo', h('input', {
           type: 'number', min: '1', max: '30', inputmode: 'numeric', value: draft.washAfter ?? '',
@@ -564,18 +656,58 @@ async function importTryOn(garments) {
 
 function gallery() {
   if (!S.tryons.length) return null;
+  const pending = S.tryons.filter((t) => !t.vote);
   return h('div', { class: 'card' },
-    h('p', { class: 'eyebrow' }, 'Le tue prove'),
+    h('div', { class: 'card-head' },
+      h('p', { class: 'eyebrow' }, 'Le tue prove'),
+      pending.length ? h('button', { class: 'btn', onclick: () => openTryOn(pending[0], true) }, icon('cards'), `Valuta (${pending.length})`) : null),
     h('div', { class: 'gallery' }, S.tryons.map((t) => h('button', { class: 'shot', onclick: () => openTryOn(t) },
-      h('img', { src: blobUrl(t.photo), alt: `Prova del ${formatDay(t.date, { day: 'numeric', month: 'long' })}`, loading: 'lazy' })))));
+      h('img', { src: blobUrl(t.photo), alt: `Prova del ${formatDay(t.date, { day: 'numeric', month: 'long' })}`, loading: 'lazy' }),
+      t.vote ? h('span', { class: `shot-vote ${t.vote > 0 ? 'up' : 'down'}` }, icon(t.vote > 0 ? 'heart-filled' : 'x')) : null))));
 }
 
-function openTryOn(t) {
+// Un voto sulla foto pesa il doppio di un pollice sulle miniature: lì l'outfit si vede davvero.
+async function voteTryOn(t, value) {
+  const items = t.itemIds.map(byId).filter(Boolean);
+  const outfit = Object.fromEntries(items.map((it) => [slotOf(it), it]));
+  const delta = value - (t.vote ?? 0);
+  const rows = [];
+  for (const [key] of Object.entries(voteDelta(outfit, 1))) {
+    S.votes[key] = (S.votes[key] ?? 0) + 2 * delta;
+    rows.push({ key, value: S.votes[key] });
+  }
+  const sig = signatureOf(outfit);
+  if (value < 0) {
+    S.disliked[sig] = today();
+    rows.push({ key: `sig:${sig}`, date: today() });
+  } else if (S.disliked[sig]) {
+    delete S.disliked[sig];
+    await db.del('votes', `sig:${sig}`);
+  }
+  await db.putMany('votes', rows);
+  t.vote = value;
+  await db.put('tryons', t);
+  changed();
+}
+
+// review: dopo il voto passa alla prova successiva ancora da valutare.
+function openTryOn(t, review = false) {
   let close;
   const names = t.itemIds.map(byId).filter(Boolean).map((it) => it.name);
-  close = openSheet(formatDay(t.date), h('div', {},
+  const choose = async (value) => {
+    await voteTryOn(t, value);
+    close();
+    render();
+    const next = review ? S.tryons.find((x) => !x.vote) : null;
+    if (next) openTryOn(next, true);
+    else toast(value > 0 ? 'Me lo ricordo' : 'Non te lo ripropongo per un mese');
+  };
+  close = openSheet(review ? 'Ti piace?' : formatDay(t.date), h('div', {},
     h('img', { class: 'full', src: blobUrl(t.photo), alt: '' }),
     names.length ? h('p', { class: 'muted' }, names.join(' · ')) : null,
+    h('div', { class: 'vote-row' },
+      h('button', { class: `vote no${t.vote === -1 ? ' on' : ''}`, onclick: () => choose(-1) }, icon('x'), 'No'),
+      h('button', { class: `vote yes${t.vote === 1 ? ' on' : ''}`, onclick: () => choose(1) }, icon('heart'), 'Mi piace')),
     h('div', { class: 'row' },
       h('button', { class: 'btn', onclick: () => shareOrDownload(t.photo, `prova-${t.date}.jpg`) }, icon('share'), 'Condividi'),
       h('span', { class: 'spacer' }),

@@ -2,6 +2,7 @@
 // Sul piano gratuito Google può usare i contenuti inviati: qui partono solo foto di vestiti.
 
 import { CATEGORIES, COLORS } from './rules.js';
+import { FABRICS, FAMILIES, TARGET_BRIEF } from './style.js';
 import { blobToBase64, toJpeg } from './images.js';
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -43,8 +44,14 @@ Rispondi solo con un oggetto JSON con questi campi:
 - "categoria": una tra ${Object.keys(CATEGORIES).join(', ')};
 - "colore": il colore principale, uno tra ${COLORS.map((c) => c[0]).join(', ')};
 - "fantasia": true se il capo ha un motivo evidente (righe, quadri, jacquard), altrimenti false;
+- "logo": true se ha un logo o una stampa grafica ben visibile, altrimenti false;
+- "tessuto": uno tra ${Object.keys(FABRICS).join(', ')};
+- "vestibilita": per le scarpe "slanciata", "media" o "robusta"; per tutto il resto "aderente", "regolare" o "ampio";
+- "stili": da una a due famiglie tra ${Object.keys(FAMILIES).join(', ')};
+- "aderenza_stile": da 1 a 5, quanto il capo sta nello stile di chi lo indossa, descritto così: ${TARGET_BRIEF};
+- "motivo_stile": se aderenza_stile è 1 o 2, il motivo in al massimo sei parole, altrimenti "";
 - "composizione": dall'etichetta, per esempio "80% lana, 20% poliammide", oppure "";
-- "lavaggio": istruzioni brevi in italiano dai simboli dell'etichetta, per esempio "a mano 30°, no asciugatrice", oppure "";
+- "lavaggio": istruzioni brevi in italiano dai simboli dell'etichetta, per esempio "lana 30°, no asciugatrice", oppure "";
 - "taglia": dall'etichetta, oppure "";
 - "marca": dall'etichetta, oppure "";
 - "calore": da 1 (leggerissimo) a 5 (pesante da inverno);
@@ -52,7 +59,10 @@ Rispondi solo con un oggetto JSON con questi campi:
 - "impermeabile": true solo se il capo è fatto per la pioggia.
 Se un dato non si legge, usa una stringa vuota.`;
 
-const clamp = (n, lo, hi, fallback) => (Number.isFinite(Number(n)) ? Math.min(hi, Math.max(lo, Math.round(Number(n)))) : fallback);
+const VOLUMES = { aderente: 1, slanciata: 1, regolare: 2, media: 2, ampio: 3, robusta: 3 };
+
+// Una stringa vuota non è zero: vuol dire "non letto".
+const clamp = (n, lo, hi, fallback) => (n !== '' && n != null && Number.isFinite(Number(n)) ? Math.min(hi, Math.max(lo, Math.round(Number(n)))) : fallback);
 
 export async function analyzeGarment(key, model, photo, label) {
   const parts = [{ text: PROMPT }];
@@ -74,5 +84,11 @@ export async function analyzeGarment(key, model, photo, label) {
     warmth: clamp(r.calore, 1, 5, null),
     formality: clamp(r.formalita, 1, 5, null),
     waterproof: Boolean(r.impermeabile),
+    logo: Boolean(r.logo),
+    fabric: FABRICS[r.tessuto] ? r.tessuto : null,
+    volume: VOLUMES[r.vestibilita] ?? null,
+    families: Array.isArray(r.stili) ? r.stili.filter((f) => FAMILIES[f]).slice(0, 2) : [],
+    styleScore: clamp(r.aderenza_stile, 1, 5, null),
+    styleWhy: String(r.motivo_stile ?? '').trim(),
   };
 }
